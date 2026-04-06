@@ -1,6 +1,6 @@
 {
 	"name": "cosmomedia-slidelizer",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Control Slidelizer Timer, NDI Slide Sender and video playback monitoring",
 	"main": "src/main.js",
 	"scripts": {

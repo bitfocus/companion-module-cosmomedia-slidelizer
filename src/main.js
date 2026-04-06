@@ -1,12 +1,18 @@
 const { InstanceBase, InstanceStatus, Regex, runEntrypoint } = require('@companion-module/base')
 const net = require('net')
+const upgrades = require('./upgrades')
+const actions = require('./actions')
+const feedbacks = require('./feedbacks')
+const variables = require('./variables')
+const presets = require('./presets')
+
+const MAX_BUFFER = 65536
 
 class SlidelizerInstance extends InstanceBase {
 	constructor(internal) {
 		super(internal)
 		this.currentTime = '00:00'
 		this.videoRemaining = '--:--'
-		this.timerRunning = false
 		this.client = null
 		this._reconnectTimer = null
 		this._reconnectDelay = 1000
@@ -19,19 +25,10 @@ class SlidelizerInstance extends InstanceBase {
 	async init(config) {
 		this.config = config || {}
 		this.updateStatus(InstanceStatus.Disconnected)
-		this.setVariableDefinitions([
-			{ variableId: 'timerValue', name: 'Current timer value (mm:ss)' },
-			{ variableId: 'timerValue_mmss', name: 'Timer (mm:ss)' },
-			{ variableId: 'timerValue_mm', name: 'Timer minutes (mm or total minutes)' },
-			{ variableId: 'timerValue_ss', name: 'Timer seconds (ss)' },
-			{ variableId: 'timerValue_hhmm', name: 'Time (hh:mm)' },
-			{ variableId: 'mode', name: 'Mode (TIMER/CLOCK)' },
-			{ variableId: 'videoRemaining', name: 'Video remaining time (mm:ss)' },
-			{ variableId: 'videoRemaining_mm', name: 'Video remaining minutes (mm)' },
-			{ variableId: 'videoRemaining_ss', name: 'Video remaining seconds (ss)' },
-		])
-		this._initActions()
-		this._initFeedbacks()
+		variables(this)
+		actions(this)
+		feedbacks(this)
+		presets(this)
 		await this._maybeConnect()
 	}
 
@@ -70,6 +67,11 @@ class SlidelizerInstance extends InstanceBase {
 		try {
 			this.client = new net.Socket()
 			this.client.setEncoding('utf8')
+			this.client.setTimeout(5000)
+			this.client.on('timeout', () => {
+				this.log('warn', 'Connection timeout')
+				this.client.destroy()
+			})
 			this.client.connect(port, host, () => {
 				this.log('info', `Connected to Slidelizer at ${host}:${port}`)
 				this.updateStatus(InstanceStatus.Ok)
@@ -91,6 +93,11 @@ class SlidelizerInstance extends InstanceBase {
 			let buffer = ''
 			this.client.on('data', (chunk) => {
 				buffer += chunk
+				if (buffer.length > MAX_BUFFER) {
+					this.log('error', 'Buffer overflow - resetting')
+					buffer = ''
+					return
+				}
 				let nl
 				while ((nl = buffer.indexOf('\n')) >= 0) {
 					const line = buffer.substring(0, nl).trim()
@@ -111,19 +118,25 @@ class SlidelizerInstance extends InstanceBase {
 							const isClockLike = /^\d{2}:\d{2}:\d{2}$/.test(line)
 							this.mode = isClockLike ? 'CLOCK' : 'TIMER'
 							this.currentTime = line
-							const { mmss, mm, ss, hhmm } = this._formatVariants(this.currentTime, this.mode)
+							const { mmss, mm, ss, hhmm, hh, hhmmss, remainMm } = this._formatVariants(this.currentTime, this.mode)
 							this.setVariableValues({
 								timerValue: mmss,
 								timerValue_mmss: mmss,
 								timerValue_mm: mm,
 								timerValue_ss: ss,
 								timerValue_hhmm: hhmm,
+								timerValue_hh: hh,
+								timerValue_hhmmss: hhmmss,
+								timerValue_remain_mm: remainMm,
 								mode: this.mode,
 							})
 							this.checkFeedbacks('show_time')
 							this.checkFeedbacks('show_time_mm')
 							this.checkFeedbacks('show_time_ss')
 							this.checkFeedbacks('show_time_hhmm')
+							this.checkFeedbacks('show_time_hh')
+							this.checkFeedbacks('show_time_hhmmss')
+							this.checkFeedbacks('show_time_remain_mm')
 						}
 					}
 				}
@@ -137,131 +150,16 @@ class SlidelizerInstance extends InstanceBase {
 		if (this.client) {
 			try {
 				this.client.destroy()
-			} catch (e) {}
+			} catch (e) {
+				this.log('debug', 'Disconnect cleanup: ' + e.message)
+			}
 			this.client = null
 		}
 		this.updateStatus(InstanceStatus.Disconnected)
 	}
 
-	_initActions() {
-		this.setActionDefinitions({
-			start: {
-				name: 'Start timer',
-				options: [],
-				callback: () => this._send('START\n'),
-			},
-			pause: {
-				name: 'Pause timer',
-				options: [],
-				callback: () => this._send('PAUSE\n'),
-			},
-			reset: {
-				name: 'Reset timer',
-				options: [],
-				callback: () => this._send('RESET\n'),
-			},
-			add_minute: {
-				name: 'Add minute',
-				options: [],
-				callback: () => this._send('ADD MINUTE\n'),
-			},
-			sub_minute: {
-				name: 'Subtract minute',
-				options: [],
-				callback: () => this._send('SUBTRACT MINUTE\n'),
-			},
-			add_second: {
-				name: 'Add second',
-				options: [],
-				callback: () => this._send('ADD SECOND\n'),
-			},
-			sub_second: {
-				name: 'Subtract second',
-				options: [],
-				callback: () => this._send('SUBTRACT SECOND\n'),
-			},
-			set_time: {
-				name: 'Set time (mm:ss)',
-				options: [{ type: 'textinput', id: 'mmss', label: 'mm:ss', default: '30:00' }],
-				callback: (event) => {
-					const mmss = (event.options?.mmss || '30:00').toString().trim()
-					this._send(`SET ${mmss}\n`)
-				},
-			},
-			toggle_clock: {
-				name: 'Toggle Clock/Timer',
-				options: [],
-				callback: () => this._send('TOGGLE_CLOCK\n'),
-			},
-			ndi_next: {
-				name: 'NDI Slide Sender: Next slide',
-				options: [],
-				callback: () => this._send('NDI_NEXT\n'),
-			},
-			ndi_prev: {
-				name: 'NDI Slide Sender: Previous slide',
-				options: [],
-				callback: () => this._send('NDI_PREV\n'),
-			},
-		})
-	}
-
-	_initFeedbacks() {
-		this.setFeedbackDefinitions({
-			show_time: {
-				type: 'advanced',
-				name: 'Show Timer (mm:ss)',
-				description: 'Displays the current timer or clock value',
-				options: [],
-				callback: () => {
-					const { mmss, hhmm } = this._formatVariants(this.currentTime, this.mode)
-					const text = this.mode === 'CLOCK' ? hhmm || '00:00' : mmss || '00:00'
-					return { text }
-				},
-			},
-			show_time_mm: {
-				type: 'advanced',
-				name: 'Show Timer (mm)',
-				description: 'Displays the minutes portion of the timer',
-				options: [],
-				callback: () => {
-					const { mm } = this._formatVariants(this.currentTime, this.mode)
-					return { text: mm || '00' }
-				},
-			},
-			show_time_ss: {
-				type: 'advanced',
-				name: 'Show Timer (ss)',
-				description: 'Displays the seconds portion of the timer',
-				options: [],
-				callback: () => {
-					const { ss } = this._formatVariants(this.currentTime, this.mode)
-					return { text: ss || '00' }
-				},
-			},
-			show_time_hhmm: {
-				type: 'advanced',
-				name: 'Show Time (hh:mm)',
-				description: 'Displays the time in hh:mm format',
-				options: [],
-				callback: () => {
-					const { hhmm } = this._formatVariants(this.currentTime, this.mode)
-					return { text: hhmm || '00:00' }
-				},
-			},
-			show_video_time: {
-				type: 'advanced',
-				name: 'Show Video Remaining (mm:ss)',
-				description: 'Remaining time of the video playing on the current PowerPoint slide',
-				options: [],
-				callback: () => {
-					return { text: this.videoRemaining || '--:--' }
-				},
-			},
-		})
-	}
-
 	_send(text) {
+		if (!text || typeof text !== 'string') return
 		if (!this.client) {
 			this.updateStatus(InstanceStatus.Disconnected)
 			this.log('warn', 'Not connected')
@@ -285,7 +183,9 @@ class SlidelizerInstance extends InstanceBase {
 				this._reconnectDelay = Math.min(this._reconnectDelay * 2, 10000)
 				await this._maybeConnect()
 			}, delay)
-		} catch {}
+		} catch (e) {
+			this.log('debug', 'Reconnect scheduling: ' + e.message)
+		}
 	}
 
 	_formatVariants(text, mode) {
@@ -308,23 +208,36 @@ class SlidelizerInstance extends InstanceBase {
 				seconds = Number(m[2]) || 0
 			}
 		}
-		let mm, ss, mmss
-		const HH = String(hours).padStart(2, '0')
-		const MM = String(minutes).padStart(2, '0')
+		const totalMinutes = hours * 60 + minutes
 		const SS = String(Math.max(0, Math.min(59, seconds))).padStart(2, '0')
+		let mm, ss, mmss, hhmm
 		if (mode === 'CLOCK') {
-			mm = HH
-			ss = MM
-			mmss = `${SS}:${MM}`
+			const HH = String(hours).padStart(2, '0')
+			const MM = String(minutes).padStart(2, '0')
+			mm = MM
+			ss = SS
+			mmss = `${MM}:${SS}`
+			hhmm = `${HH}:${MM}`
 		} else {
-			const totalMinutes = hours * 60 + minutes
 			mm = String(totalMinutes).padStart(2, '0')
 			ss = SS
 			mmss = `${mm}:${ss}`
+			const hh = String(Math.floor(totalMinutes / 60)).padStart(2, '0')
+			const remainMm = String(totalMinutes % 60).padStart(2, '0')
+			hhmm = `${hh}:${remainMm}`
 		}
-		const hhmm = `${HH}:${MM}`
-		return { mmss, mm, ss, hhmm }
+		let hh, hhmmss, remainMm
+		if (mode === 'CLOCK') {
+			hh = String(hours).padStart(2, '0')
+			remainMm = String(minutes).padStart(2, '0')
+			hhmmss = `${hh}:${remainMm}:${SS}`
+		} else {
+			hh = String(Math.floor(totalMinutes / 60)).padStart(2, '0')
+			remainMm = String(totalMinutes % 60).padStart(2, '0')
+			hhmmss = `${hh}:${remainMm}:${ss}`
+		}
+		return { mmss, mm, ss, hhmm, hh, hhmmss, remainMm }
 	}
 }
 
-runEntrypoint(SlidelizerInstance, [])
+runEntrypoint(SlidelizerInstance, upgrades)
