@@ -113,7 +113,6 @@ class SlidelizerInstance extends InstanceBase {
 								videoRemaining_mm: vMm,
 								videoRemaining_ss: vSs,
 							})
-							this.checkFeedbacks('show_video_time')
 						} else {
 							const isClockLike = /^\d{2}:\d{2}:\d{2}$/.test(line)
 							this.mode = isClockLike ? 'CLOCK' : 'TIMER'
@@ -130,13 +129,6 @@ class SlidelizerInstance extends InstanceBase {
 								timerValue_remain_mm: remainMm,
 								mode: this.mode,
 							})
-							this.checkFeedbacks('show_time')
-							this.checkFeedbacks('show_time_mm')
-							this.checkFeedbacks('show_time_ss')
-							this.checkFeedbacks('show_time_hhmm')
-							this.checkFeedbacks('show_time_hh')
-							this.checkFeedbacks('show_time_hhmmss')
-							this.checkFeedbacks('show_time_remain_mm')
 						}
 					}
 				}
